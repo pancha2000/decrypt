@@ -1,123 +1,215 @@
-import json
+#!/usr/bin/env python3
+"""
+DARK TUNNEL config diagnostic tool
+- Detects exact failure point
+- Tries all AES modes (CFB-128, CFB-8, CBC, OFB, CTR)
+- Tries both keys (KEY_256 outer, KEY_192 inner)
+- Shows msgpack vs non-msgpack content
+"""
+import sys
 import base64
+import json
 from Crypto.Cipher import AES
-import msgpack
 
+try:
+    import msgpack
+    MSGPACK = True
+except ImportError:
+    MSGPACK = False
+    print("[!] msgpack not installed — install with: pip install msgpack")
+
+
+# === Constants ===
 KEY_256 = b"$B&E)H@McQfThWmZq4t7w!z%C*F-JaNd"
 KEY_192 = b"F)J@NcRfUjXn2r4u7x!A%D*G"
-IV = bytes.fromhex("232e39185523184a5723586242200e05")
+IV      = bytes.fromhex("232e39185523184a5723586242200e05")
+
+MSGPACK_MAP_MARKERS = set(range(0x80, 0x90)) | {0xde, 0xdf}   # map8/16/32
+MSGPACK_ARR_MARKERS = set(range(0x90, 0xa0)) | {0xdc, 0xdd}   # arr8/16/32
+MSGPACK_STR_MARKERS = set(range(0xa0, 0xc0)) | {0xd9, 0xda, 0xdb}
 
 
-def b64d(s):
+def b64d(s: str) -> bytes:
     s = s.replace("-", "+").replace("_", "/")
     s += "=" * (-len(s) % 4)
     return base64.b64decode(s)
 
 
-def try_decrypt(data, key, iv):
-    """Try all AES modes and return first that looks like msgpack"""
-    results = {}
-    modes = {
+def try_aes(data: bytes, key: bytes, iv: bytes):
+    """Try all AES modes. Returns dict {mode: plaintext_or_error}."""
+    out = {}
+    attempts = {
         "CFB-128": lambda: AES.new(key, AES.MODE_CFB, iv=iv, segment_size=128).decrypt(data),
         "CFB-8":   lambda: AES.new(key, AES.MODE_CFB, iv=iv, segment_size=8).decrypt(data),
         "CBC":     lambda: AES.new(key, AES.MODE_CBC, iv=iv).decrypt(data),
         "OFB":     lambda: AES.new(key, AES.MODE_OFB, iv=iv).decrypt(data),
-        "CTR":     lambda: AES.new(key, AES.MODE_CTR, nonce=b"", initial_value=int.from_bytes(iv[:8], "big")).decrypt(data),
+        "CTR":     lambda: AES.new(key, AES.MODE_CTR,
+                                   nonce=b"",
+                                   initial_value=int.from_bytes(iv[:8], "big")).decrypt(data),
     }
-    for name, fn in modes.items():
+    for name, fn in attempts.items():
         try:
-            pt = fn()
-            results[name] = pt
+            out[name] = fn()
         except Exception as e:
-            results[name] = f"ERR: {e}"
-    return results
+            out[name] = f"ERROR: {e}"
+    return out
 
 
-def is_msgpack_like(data):
-    """msgpack starts with a map (0x80-0x8f) or other known marker"""
-    if not data or len(data) < 1:
-        return False
-    return data[0] in (0x80, 0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87,
-                       0x88, 0x89, 0x8a, 0x8b, 0x8c, 0x8d, 0x8e, 0x8f,
-                       0xde, 0xdf)  # map16, map32
-
-
-# ============ MAIN ============
-with open("ddy.dark", "rb") as f:
-    raw = f.read().decode("utf-8", errors="ignore").strip()
-
-print("=" * 70)
-print("[STEP 1] Strip scheme")
-print("=" * 70)
-if "://" in raw:
-    raw = raw.split("://", 1)[1]
-print(f"  Length after strip: {len(raw)}")
-
-print("\n" + "=" * 70)
-print("[STEP 2] Base64 decode outer")
-print("=" * 70)
-decoded = b64d(raw)
-print(f"  Decoded: {len(decoded)} bytes")
-
-print("\n" + "=" * 70)
-print("[STEP 3] JSON parse")
-print("=" * 70)
-outer = json.loads(decoded.decode("utf-8"))
-print(f"  Keys: {list(outer.keys())}")
-
-# Check trojanTunnelConfig (should be plaintext)
-if "trojanTunnelConfig" in outer:
-    print(f"\n  [trojanTunnelConfig] (plaintext?):")
-    print(f"  {json.dumps(outer['trojanTunnelConfig'], indent=2)[:500]}")
-
-# Get encryptedLockedConfig
-enc_locked = outer["encryptedLockedConfig"]
-print(f"\n  encryptedLockedConfig type: {type(enc_locked)}")
-print(f"  encryptedLockedConfig value (first 100 chars): {str(enc_locked)[:100]}")
-
-print("\n" + "=" * 70)
-print("[STEP 4] Base64 decode encryptedLockedConfig")
-print("=" * 70)
-if isinstance(enc_locked, str):
-    enc_bytes = b64d(enc_locked)
-else:
-    enc_bytes = enc_locked  # already bytes
-print(f"  Encrypted blob: {len(enc_bytes)} bytes")
-print(f"  First 32 hex: {enc_bytes[:32].hex()}")
-print(f"  Length % 16: {len(enc_bytes) % 16}")
-
-print("\n" + "=" * 70)
-print("[STEP 5] Try KEY_256 with all modes")
-print("=" * 70)
-results = try_decrypt(enc_bytes, KEY_256, IV)
-for mode, pt in results.items():
+def analyze(pt: bytes) -> str:
+    """Describe decoded bytes."""
     if isinstance(pt, str):
-        print(f"  {mode}: {pt}")
+        return pt
+    if not pt:
+        return "EMPTY"
+    first = pt[0]
+    info = [f"{len(pt)}B", f"first={first:#04x}"]
+    if first in MSGPACK_MAP_MARKERS:
+        info.append("MSGPACK-MAP")
+    elif first in MSGPACK_ARR_MARKERS:
+        info.append("MSGPACK-ARR")
+    elif first in MSGPACK_STR_MARKERS:
+        info.append("MSGPACK-STR")
+    elif first == 0x7b:
+        info.append("JSON?")
+    elif first == 0x5b:
+        info.append("JSON-ARR?")
     else:
-        mp_like = is_msgpack_like(pt)
-        print(f"  {mode}: {len(pt)} bytes, first byte: {pt[0]:#04x}, "
-              f"msgpack-like: {mp_like}")
-        if mp_like:
-            try:
-                unpacked = msgpack.unpackb(pt, raw=False, strict_map_key=False)
-                print(f"    ✓✓✓ MSGPACK SUCCESS! Keys: {list(unpacked.keys()) if isinstance(unpacked, dict) else type(unpacked)}")
-                # Try inner layer
-                if isinstance(unpacked, dict) and "EncryptedLockedConfig" in unpacked:
-                    print(f"    Inner 'EncryptedLockedConfig' found!")
-                    inner_enc = unpacked["EncryptedLockedConfig"]
-                    print(f"    Inner encrypted: {len(inner_enc)} bytes")
-                    inner_results = try_decrypt(inner_enc, KEY_192, IV)
-                    for imode, ipt in inner_results.items():
-                        if isinstance(ipt, str):
-                            continue
-                        imp_like = is_msgpack_like(ipt)
-                        print(f"      {imode}: msgpack-like: {imp_like}")
-                        if imp_like:
-                            try:
-                                inner = msgpack.unpackb(ipt, raw=False, strict_map_key=False)
-                                print(f"      ✓✓✓ INNER MSGPACK SUCCESS! Keys: {list(inner.keys()) if isinstance(inner, dict) else type(inner)}")
-                            except Exception as e:
-                                print(f"      msgpack fail: {e}")
-            except Exception as e:
-                print(f"    msgpack fail: {e}")
-            print(f"    Raw (first 100): {pt[:100]!r}")
+        info.append("unknown")
+    return "  ".join(info)
+
+
+def try_msgpack(data: bytes):
+    """Return (success_bool, result_or_error)."""
+    if not MSGPACK or isinstance(data, str):
+        return False, "msgpack unavailable"
+    try:
+        return True, msgpack.unpackb(data, raw=False, strict_map_key=False)
+    except Exception as e:
+        return False, str(e)
+
+
+def full_pipeline(input_text: str):
+    print("\n" + "=" * 72)
+    print("STEP 1: Strip scheme")
+    print("=" * 72)
+    raw = input_text.strip()
+    if "://" in raw:
+        scheme = raw.split("://", 1)[0]
+        raw = raw.split("://", 1)[1]
+        print(f"  Scheme: {scheme}://  → stripped")
+    else:
+        print("  No scheme found")
+
+    print("\n" + "=" * 72)
+    print("STEP 2: Base64 decode (outer)")
+    print("=" * 72)
+    try:
+        outer_bytes = b64d(raw)
+        print(f"  ✓ {len(outer_bytes)} bytes")
+        print(f"  First 40 hex: {outer_bytes[:40].hex()}")
+    except Exception as e:
+        print(f"  ✗ FAILED: {e}")
+        return
+
+    print("\n" + "=" * 72)
+    print("STEP 3: JSON parse (outer)")
+    print("=" * 72)
+    try:
+        outer = json.loads(outer_bytes.decode("utf-8"))
+        print(f"  ✓ JSON OK. Keys: {list(outer.keys())}")
+    except Exception as e:
+        print(f"  ✗ FAILED: {e}")
+        print(f"  Raw: {outer_bytes[:200]!r}")
+        return
+
+    if "encryptedLockedConfig" not in outer:
+        print(f"  ✗ 'encryptedLockedConfig' NOT FOUND")
+        return
+    print(f"  ✓ 'encryptedLockedConfig' present")
+
+    # Optional: show plaintext trojanTunnelConfig
+    if "trojanTunnelConfig" in outer:
+        print(f"\n  [trojanTunnelConfig] (plaintext — no decrypt needed):")
+        print(f"  {json.dumps(outer['trojanTunnelConfig'], indent=2)[:400]}")
+
+    print("\n" + "=" * 72)
+    print("STEP 4: Base64 decode encryptedLockedConfig")
+    print("=" * 72)
+    enc_val = outer["encryptedLockedConfig"]
+    try:
+        enc = b64d(enc_val) if isinstance(enc_val, str) else enc_val
+        print(f"  ✓ {len(enc)} bytes")
+        print(f"  First 32 hex: {enc[:32].hex()}")
+        print(f"  len % 16 = {len(enc) % 16}  (0 → CBC/block aligned, 12/16 → GCM, else → CFB/CTR)")
+    except Exception as e:
+        print(f"  ✗ FAILED: {e}")
+        return
+
+    print("\n" + "=" * 72)
+    print("STEP 5: KEY_256 decryption attempts")
+    print("=" * 72)
+    results_outer = try_aes(enc, KEY_256, IV)
+    winning_mode = None
+    winning_pt = None
+    for mode, pt in results_outer.items():
+        desc = analyze(pt)
+        print(f"  {mode:8s}: {desc}")
+        if not isinstance(pt, str):
+            ok, val = try_msgpack(pt)
+            if ok:
+                print(f"           ✓✓✓ MSGPACK OK: keys={list(val.keys()) if isinstance(val, dict) else type(val).__name__}")
+                if winning_mode is None:
+                    winning_mode = mode
+                    winning_pt = pt
+            else:
+                print(f"           msgpack: {val}")
+                print(f"           first 80: {pt[:80]!r}")
+
+    if winning_pt is None:
+        print("\n  ✗ NO mode succeeded for outer layer")
+        # Show raw attempt output to help debugging
+        print("\n  [RAW HEX of each mode — first 80 bytes]")
+        for mode, pt in results_outer.items():
+            if not isinstance(pt, str):
+                print(f"    {mode}: {pt[:80].hex()}")
+        return
+
+    print(f"\n  ✓ OUTER LAYER DECRYPTED with mode = {winning_mode}")
+    unpacked = msgpack.unpackb(winning_pt, raw=False, strict_map_key=False)
+    if isinstance(unpacked, dict):
+        print(f"  Outer msgpack keys: {list(unpacked.keys())}")
+
+    # ========== INNER LAYER ==========
+    if isinstance(unpacked, dict) and "EncryptedLockedConfig" in unpacked:
+        print("\n" + "=" * 72)
+        print("STEP 6: Inner layer (EncryptedLockedConfig)")
+        print("=" * 72)
+        inner_enc = unpacked["EncryptedLockedConfig"]
+        if isinstance(inner_enc, str):
+            inner_enc = inner_enc.encode("latin1")
+        print(f"  Inner encrypted: {len(inner_enc)} bytes")
+
+        results_inner = try_aes(inner_enc, KEY_192, IV)
+        for mode, pt in results_inner.items():
+            desc = analyze(pt)
+            print(f"  {mode:8s}: {desc}")
+            if not isinstance(pt, str):
+                ok, val = try_msgpack(pt)
+                if ok:
+                    print(f"           ✓✓✓ INNER MSGPACK OK: keys={list(val.keys()) if isinstance(val, dict) else type(val).__name__}")
+                else:
+                    print(f"           msgpack: {val}")
+
+    print("\n" + "=" * 72)
+    print("DONE")
+    print("=" * 72)
+
+
+if __name__ == "__main__":
+    if len(sys.argv) >= 2:
+        with open(sys.argv[1], "rb") as f:
+            text = f.read().decode("utf-8", errors="ignore")
+    else:
+        print("Paste darktunnel:// input, then Ctrl+D:")
+        text = sys.stdin.read()
+    full_pipeline(text)
