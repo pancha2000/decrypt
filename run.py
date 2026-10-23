@@ -8,17 +8,16 @@ import HTTPINJECTOR
 import DARKTUNNEL
 import NETMOD
 import NETMOD_LINK
-import ZIVPN
-
+import ZIVPN        # ← අලුතින් හදපු ZIVPN.py එක import වෙනවා
 
 def decrypt_file(file_bytes: bytes):
     modules = [
-        ("HTTPCUSTOM",   HTTPCUSTOM),
-        ("HTTPINJECTOR", HTTPINJECTOR),
+        ("ZIVPN",        ZIVPN),        # ZIVPN එක මුලටම දාමු (safe)
         ("DARKTUNNEL",   DARKTUNNEL),
         ("NETMOD",       NETMOD),
         ("NETMOD_LINK",  NETMOD_LINK),
-        ("ZIVPN",        ZIVPN),
+        ("HTTPCUSTOM",   HTTPCUSTOM),
+        ("HTTPINJECTOR", HTTPINJECTOR),
     ]
     for name, mod in modules:
         print(f"\n{'=' * 60}\n[*] Trying {name}...\n{'=' * 60}")
@@ -28,11 +27,8 @@ def decrypt_file(file_bytes: bytes):
                 return name, res
             print(f"[*] {name}: returned None")
         except Exception as e:
-            import traceback
             print(f"[*] {name} EXCEPTION: {type(e).__name__}: {e}")
-            traceback.print_exc()
     return None, None
-
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
@@ -42,8 +38,8 @@ if __name__ == "__main__":
     target = sys.argv[1].strip()
     file_bytes = None
 
-    if target.lower().startswith("nm-"):
-        print(f"[*] Detected NetMod link: {target[:40]}...")
+    if target.lower().startswith("nm-") or target.lower().startswith("zivpn://"):
+        print(f"[*] Detected link: {target[:40]}...")
         file_bytes = target.encode("utf-8")
     elif target.startswith(("http://", "https://")):
         print(f"[*] Downloading: {target}")
