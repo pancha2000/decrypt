@@ -8,6 +8,7 @@ import HTTPINJECTOR
 import DARKTUNNEL
 import NETMOD
 import NETMOD_LINK
+import ZIVPN
 
 
 def decrypt_file(file_bytes: bytes):
@@ -17,6 +18,7 @@ def decrypt_file(file_bytes: bytes):
         ("DARKTUNNEL",   DARKTUNNEL),
         ("NETMOD",       NETMOD),
         ("NETMOD_LINK",  NETMOD_LINK),
+        ("ZIVPN",        ZIVPN),
     ]
     for name, mod in modules:
         print(f"\n{'=' * 60}\n[*] Trying {name}...\n{'=' * 60}")
