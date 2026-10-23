@@ -16,7 +16,7 @@ def decrypt_file(file_bytes: bytes):
         ("DARKTUNNEL",   DARKTUNNEL),
     ]
     for name, mod in modules:
-        print(f"\n{'='*60}\n[*] Trying {name}...\n{'='*60}")
+        print(f"\n{'=' * 60}\n[*] Trying {name}...\n{'=' * 60}")
         try:
             res = mod.run(file_bytes)
             if res:
