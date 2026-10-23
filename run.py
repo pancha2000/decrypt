@@ -6,6 +6,7 @@ import requests
 import HTTPCUSTOM
 import HTTPINJECTOR
 import DARKTUNNEL
+import NETMOD
 
 
 def decrypt_file(file_bytes: bytes):
@@ -14,6 +15,7 @@ def decrypt_file(file_bytes: bytes):
         ("HTTPCUSTOM",   HTTPCUSTOM),
         ("HTTPINJECTOR", HTTPINJECTOR),
         ("DARKTUNNEL",   DARKTUNNEL),
+        ("NETMOD",       NETMOD),
     ]
     for name, mod in modules:
         print(f"\n{'=' * 60}\n[*] Trying {name}...\n{'=' * 60}")
