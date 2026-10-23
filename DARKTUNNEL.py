@@ -1,9 +1,9 @@
-"""DARKTUNNEL decryptor — fixed version with auto AES mode detection."""
+"""DARKTUNNEL decryptor — final production version."""
 import json
 import base64
 import re
 import contextlib
-from typing import Optional, Any, Union, List
+from typing import Optional, Any, Union
 from Crypto.Cipher import AES
 
 try:
@@ -20,12 +20,12 @@ class DTConstants:
     IV: bytes = bytes.fromhex("232e39185523184a5723586242200e05")
 
 
-# msgpack map markers (map8/map16/map32)
-_MSGPACK_MAP_MARKERS = frozenset(range(0x80, 0x90)) | {0xde, 0xdf}
+# msgpack map markers (map8 / map16 / map32)
+_MSGPACK_MAP = frozenset(range(0x80, 0x90)) | {0xde, 0xdf}
 
 
 def _looks_like_msgpack(data: bytes) -> bool:
-    return bool(data) and data[0] in _MSGPACK_MAP_MARKERS
+    return bool(data) and data[0] in _MSGPACK_MAP
 
 
 class DTDecryptor:
@@ -33,45 +33,34 @@ class DTDecryptor:
 
     @staticmethod
     def _base64_decode_safe(data: str) -> bytes:
-        clean_data = data.replace("-", "+").replace("_", "/")
-        if pad := len(clean_data) % 4:
-            clean_data += "=" * (4 - pad)
-        return base64.b64decode(clean_data)
+        clean = data.replace("-", "+").replace("_", "/")
+        clean += "=" * (-len(clean) % 4)
+        return base64.b64decode(clean)
 
     @staticmethod
     def _aes_cfb_decrypt(data: bytes, key: bytes, iv: bytes) -> bytes:
         """
-        Auto-detect CFB segment size:
-          - Go's cipher.NewCFBDecrypter → CFB-128
-          - Java/Android Cipher CFB → often CFB-8
-        Returns the first result that looks like a msgpack map.
-        Falls back to CFB-128 if neither matches.
+        Primary: AES-CFB-128 (Go's cipher.NewCFBDecrypter).
+        Fallbacks: CFB-8, CBC, OFB, CTR — only if the primary result
+        doesn't look like a msgpack map.
         """
-        pt128 = AES.new(key, AES.MODE_CFB, iv=iv, segment_size=128).decrypt(data)
-        if _looks_like_msgpack(pt128):
-            return pt128
-        try:
-            pt8 = AES.new(key, AES.MODE_CFB, iv=iv, segment_size=8).decrypt(data)
-            if _looks_like_msgpack(pt8):
-                return pt8
-        except Exception:
-            pass
-        # Fallback: try CBC / OFB / CTR (rarely needed)
-        for mode, fn in [
-            (AES.MODE_CBC, lambda: AES.new(key, AES.MODE_CBC, iv=iv).decrypt(data)),
-            (AES.MODE_OFB, lambda: AES.new(key, AES.MODE_OFB, iv=iv).decrypt(data)),
-            (AES.MODE_CTR, lambda: AES.new(
-                key, AES.MODE_CTR, nonce=b"",
-                initial_value=int.from_bytes(iv[:8], "big"),
-            ).decrypt(data)),
-        ]:
+        pt = AES.new(key, AES.MODE_CFB, iv=iv, segment_size=128).decrypt(data)
+        if _looks_like_msgpack(pt):
+            return pt
+        for fn in (
+            lambda: AES.new(key, AES.MODE_CFB, iv=iv, segment_size=8).decrypt(data),
+            lambda: AES.new(key, AES.MODE_CBC, iv=iv).decrypt(data),
+            lambda: AES.new(key, AES.MODE_OFB, iv=iv).decrypt(data),
+            lambda: AES.new(key, AES.MODE_CTR, nonce=b"",
+                            initial_value=int.from_bytes(iv[:8], "big")).decrypt(data),
+        ):
             try:
-                pt = fn()
-                if _looks_like_msgpack(pt):
-                    return pt
+                r = fn()
+                if _looks_like_msgpack(r):
+                    return r
             except Exception:
                 continue
-        return pt128  # original behavior as last resort
+        return pt
 
     @staticmethod
     def _is_utf8_printable(value: bytes) -> bool:
@@ -90,15 +79,16 @@ class DTDecryptor:
         if (stripped.startswith("{") and stripped.endswith("}")) or \
            (stripped.startswith("[") and stripped.endswith("]")):
             with contextlib.suppress(Exception):
-                fixed_json = re.sub(r'(:\s*)(\$[A-Za-z0-9_]+)', r'\1"\2"', stripped)
-                return cls._normalize_for_json(json.loads(fixed_json))
+                fixed = re.sub(r'(:\s*)(\$[A-Za-z0-9_]+)', r'\1"\2"', stripped)
+                return cls._normalize_for_json(json.loads(fixed))
         return value
 
     @classmethod
     def _normalize_for_json(cls, value: Any) -> Any:
         if isinstance(value, dict):
             return {k: cls._normalize_for_json(v)
-                    for k, v in value.items() if k != "Password"}
+                    for k, v in value.items()
+                    if k.lower() != "password"}
         if isinstance(value, list):
             return [cls._normalize_for_json(v) for v in value]
         if isinstance(value, bytes):
@@ -114,7 +104,7 @@ class DTDecryptor:
             cleaned = {}
             for k, v in value.items():
                 if isinstance(k, str) and k.startswith("Encrypted") \
-                        and v and isinstance(v, (bytes, bytearray)):
+                        and isinstance(v, (bytes, bytearray)) and v:
                     try:
                         cleaned[k] = cls._aes_cfb_decrypt(bytes(v), key, iv)
                     except Exception:
@@ -129,9 +119,10 @@ class DTDecryptor:
     @classmethod
     def execute(cls, file_bytes: bytes) -> Optional[str]:
         if not MSGPACK_AVAILABLE:
+            print("[DT] msgpack not installed → pip install msgpack")
             return None
 
-        try:  # ← explicit try/except so errors are printed, not silent
+        try:
             raw_input = file_bytes.decode("utf-8", errors="ignore").strip()
             if not raw_input:
                 return None
@@ -146,8 +137,8 @@ class DTDecryptor:
             decrypted_outer = cls._aes_cfb_decrypt(enc, DTConstants.KEY_256, DTConstants.IV)
 
             try:
-                unpacked_outer = msgpack.unpackb(decrypted_outer, raw=False,
-                                                 strict_map_key=False)
+                unpacked_outer = msgpack.unpackb(
+                    decrypted_outer, raw=False, strict_map_key=False)
             except Exception as e:
                 print(f"[DT] outer msgpack failed: {e}")
                 return None
@@ -157,15 +148,15 @@ class DTDecryptor:
                 inner_enc = unpacked_outer["EncryptedLockedConfig"]
                 if isinstance(inner_enc, str):
                     inner_enc = inner_enc.encode("latin1")
-                decrypted_inner = cls._aes_cfb_decrypt(
-                    inner_enc, DTConstants.KEY_192, DTConstants.IV)
                 try:
-                    unpacked_inner = msgpack.unpackb(decrypted_inner, raw=False,
-                                                     strict_map_key=False)
+                    decrypted_inner = cls._aes_cfb_decrypt(
+                        inner_enc, DTConstants.KEY_192, DTConstants.IV)
+                    unpacked_inner = msgpack.unpackb(
+                        decrypted_inner, raw=False, strict_map_key=False)
                     unpacked_outer["EncryptedLockedConfig"] = cls._clean_encrypted(
                         unpacked_inner, DTConstants.KEY_192, DTConstants.IV)
                 except Exception as e:
-                    print(f"[DT] inner msgpack failed: {e}")
+                    print(f"[DT] inner layer failed: {e}")
 
             outer["encryptedLockedConfig"] = unpacked_outer
             normalized = cls._normalize_for_json(outer)
@@ -178,7 +169,7 @@ class DTDecryptor:
             )
         except Exception as e:
             import traceback
-            print(f"[DT] EXCEPTION: {type(e).__name__}: {e}")
+            print(f"[DT] {type(e).__name__}: {e}")
             traceback.print_exc()
             return None
 
