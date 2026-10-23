@@ -7,15 +7,16 @@ import HTTPCUSTOM
 import HTTPINJECTOR
 import DARKTUNNEL
 import NETMOD
+import NETMOD_LINK
 
 
 def decrypt_file(file_bytes: bytes):
-    """Try each module in order. Return (name, output) or (None, None)."""
     modules = [
         ("HTTPCUSTOM",   HTTPCUSTOM),
         ("HTTPINJECTOR", HTTPINJECTOR),
         ("DARKTUNNEL",   DARKTUNNEL),
         ("NETMOD",       NETMOD),
+        ("NETMOD_LINK",  NETMOD_LINK),
     ]
     for name, mod in modules:
         print(f"\n{'=' * 60}\n[*] Trying {name}...\n{'=' * 60}")
@@ -33,19 +34,21 @@ def decrypt_file(file_bytes: bytes):
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Usage: python run.py <url_or_filepath>")
+        print("Usage: python run.py <url_or_filepath_or_link>")
         sys.exit(1)
 
-    target = sys.argv[1]
+    target = sys.argv[1].strip()
     file_bytes = None
 
-    if target.startswith(("http://", "https://")):
+    if target.lower().startswith("nm-"):
+        print(f"[*] Detected NetMod link: {target[:40]}...")
+        file_bytes = target.encode("utf-8")
+    elif target.startswith(("http://", "https://")):
         print(f"[*] Downloading: {target}")
         try:
             r = requests.get(target, timeout=30)
             r.raise_for_status()
             file_bytes = r.content
-            print(f"[*] Downloaded {len(file_bytes)} bytes")
         except Exception as e:
             print(f"[-] Download failed: {e}")
             sys.exit(1)
@@ -68,4 +71,3 @@ if __name__ == "__main__":
     else:
         print("[-] Decryption failed for all supported modules.")
         print("=" * 60)
-        print("Run: python debug_dt.py <file>  to diagnose")
